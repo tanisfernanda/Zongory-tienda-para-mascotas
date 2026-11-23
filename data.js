@@ -14,6 +14,13 @@ export const CATEGORIAS = [
   'Accesorios',
 ];
 
+export function obtenerStockTotal(prod) {
+  if (Array.isArray(prod.variantes) && prod.variantes.length > 0) {
+    return prod.variantes.reduce((acc, v) => acc + Math.max(0, Number(v.stock) || 0), 0);
+  }
+  return Math.max(0, Number(prod.stock) || 0);
+}
+
 export const PRODUCTOS_INICIALES = [
   {
     id: 1,
@@ -23,6 +30,11 @@ export const PRODUCTOS_INICIALES = [
     stock: 25,
     descripcion: 'Alimento seco completo con proteínas y nutrientes para perros adultos.',
     resenas: [5, 4, 5],
+    variantes: [
+      { id: 'v-1-2kg', etiqueta: 'Bolsa 2 kg', precioFinal: 45000, stock: 10 },
+      { id: 'v-1-8kg', etiqueta: 'Bulto 8 kg', precioFinal: 85000, stock: 15 },
+      { id: 'v-1-15kg', etiqueta: 'Bulto 15 kg', precioFinal: 145000, stock: 0 },
+    ],
   },
   {
     id: 2,
@@ -32,6 +44,10 @@ export const PRODUCTOS_INICIALES = [
     stock: 18,
     descripcion: 'Alimento balanceado con sabor a pollo para gatos de todas las edades.',
     resenas: [4, 5],
+    variantes: [
+      { id: 'v-2-1kg', etiqueta: 'Bolsa 1.5 kg', precioFinal: 34000, stock: 8 },
+      { id: 'v-2-4kg', etiqueta: 'Bolsa 4 kg', precioFinal: 62000, stock: 10 },
+    ],
   },
   {
     id: 3,
@@ -86,6 +102,11 @@ export const PRODUCTOS_INICIALES = [
     stock: 14,
     descripcion: 'Arnés cómodo y ajustable para pasear perros de manera segura.',
     resenas: [4, 5, 4],
+    variantes: [
+      { id: 'v-8-s', etiqueta: 'Talla S', precioFinal: 32000, stock: 6 },
+      { id: 'v-8-m', etiqueta: 'Talla M', precioFinal: 35000, stock: 5 },
+      { id: 'v-8-l', etiqueta: 'Talla L', precioFinal: 38000, stock: 3 },
+    ],
   },
   {
     id: 9,

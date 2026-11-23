@@ -3,9 +3,9 @@ import {
   SafeAreaView, View, Text, TextInput, FlatList, ScrollView, Pressable, StyleSheet,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { COLORS, CATEGORIAS, PRODUCTOS_INICIALES } from './data';
+import { COLORS, CATEGORIAS, PRODUCTOS_INICIALES, obtenerStockTotal } from './data';
 
-const CLAVE = '@zongory_app';
+const CLAVE = '@zongory_v2';
 const FORM_VACIO = { nombre: '', categoria: 'Comida', precio: '', stock: '', descripcion: '' };
 
 function cop(n) {
@@ -19,10 +19,15 @@ function promResenas(r = []) {
   return (suma / r.length).toFixed(1) + '/5 (' + r.length + ')';
 }
 
+function tieneVariantes(prod) {
+  return Array.isArray(prod?.variantes) && prod.variantes.length > 0;
+}
+
 export default function App() {
   const [productos, setProductos] = useState(PRODUCTOS_INICIALES);
   const [vista, setVista] = useState('inicio');
   const [idDetalle, setIdDetalle] = useState(null);
+  const [varSelId, setVarSelId] = useState(null);
   const [favoritos, setFavoritos] = useState([]);
   const [carrito, setCarrito] = useState([]);
   const [historial, setHistorial] = useState([]);
@@ -48,7 +53,7 @@ export default function App() {
         const raw = await AsyncStorage.getItem(CLAVE);
         if (raw) {
           const d = JSON.parse(raw);
-          if (d.catalogoVersion === 2 && Array.isArray(d.productos) && d.productos.length) setProductos(d.productos);
+          if (d.catalogoVersion === 4 && Array.isArray(d.productos) && d.productos.length) setProductos(d.productos);
           if (Array.isArray(d.favoritos)) setFavoritos(d.favoritos);
           if (Array.isArray(d.carrito)) setCarrito(d.carrito);
           if (Array.isArray(d.historial)) setHistorial(d.historial);
@@ -66,9 +71,16 @@ export default function App() {
     if (!listo) return;
     AsyncStorage.setItem(
       CLAVE,
-      JSON.stringify({ catalogoVersion: 2, productos, favoritos, carrito, historial }),
+      JSON.stringify({ catalogoVersion: 4, productos, favoritos, carrito, historial }),
     ).catch(() => {});
   }, [productos, favoritos, carrito, historial, listo]);
+
+  function abrirDetalle(id) {
+    setIdDetalle(id);
+    setVarSelId(null);
+    setAviso('');
+    setVista('detalle');
+  }
 
   const filtrados = [...productos]
     .filter((p) => {
@@ -92,43 +104,116 @@ export default function App() {
     }
   }
 
-  function agregarCarrito(prod) {
-    if (prod.stock <= 0) {
+  function agregarCarrito(prod, varianteElegida = null) {
+    if (!prod) return;
+
+    // Si el producto tiene variantes, exige elegir una antes de agregar
+    if (tieneVariantes(prod)) {
+      if (!varianteElegida) {
+        setAviso('Selecciona una opción antes de agregar al carrito.');
+        return;
+      }
+      const stockVar = Math.max(0, Number(varianteElegida.stock) || 0);
+      const precioVar = Number(varianteElegida.precioFinal ?? prod.precio) || 0;
+
+      if (stockVar <= 0) {
+        setAviso('Esa variante está agotada.');
+        return;
+      }
+
+      const item = carrito.find(
+        (c) => c.productoId === prod.id && c.varianteId === varianteElegida.id,
+      );
+      const cantActual = item ? item.cantidad : 0;
+
+      if (cantActual + 1 > stockVar) {
+        setAviso('Solo puedes llevar máximo ' + stockVar + ' unidades de ' + varianteElegida.etiqueta + '.');
+        return;
+      }
+
+      if (item) {
+        setCarrito(
+          carrito.map((c) =>
+            c.productoId === prod.id && c.varianteId === varianteElegida.id
+              ? { ...c, cantidad: c.cantidad + 1, precioUnitario: precioVar }
+              : c,
+          ),
+        );
+      } else {
+        setCarrito([
+          ...carrito,
+          {
+            productoId: prod.id,
+            varianteId: varianteElegida.id,
+            varianteEtiqueta: varianteElegida.etiqueta,
+            precioUnitario: precioVar,
+            cantidad: 1,
+          },
+        ]);
+      }
+      setAviso('Agregado: ' + prod.nombre + ' (' + varianteElegida.etiqueta + ')');
+      return;
+    }
+
+    // Producto sin variantes (flujo original)
+    const stockDisp = obtenerStockTotal(prod);
+    if (stockDisp <= 0) {
       setAviso('Producto agotado.');
       return;
     }
-    const item = carrito.find((c) => c.productoId === prod.id);
+    const item = carrito.find((c) => c.productoId === prod.id && !c.varianteId);
     const cant = item ? item.cantidad : 0;
-    if (cant >= prod.stock) {
-      setAviso('Stock máximo alcanzado (' + prod.stock + ').');
+    if (cant >= stockDisp) {
+      setAviso('Stock máximo alcanzado (' + stockDisp + ').');
       return;
     }
     if (item) {
-      setCarrito(carrito.map((c) => (c.productoId === prod.id ? { ...c, cantidad: c.cantidad + 1 } : c)));
+      setCarrito(
+        carrito.map((c) =>
+          c.productoId === prod.id && !c.varianteId ? { ...c, cantidad: c.cantidad + 1 } : c,
+        ),
+      );
     } else {
-      setCarrito([...carrito, { productoId: prod.id, cantidad: 1 }]);
+      setCarrito([...carrito, { productoId: prod.id, varianteId: null, varianteEtiqueta: '', precioUnitario: prod.precio, cantidad: 1 }]);
     }
     setAviso('Agregado: ' + prod.nombre);
   }
 
-  function cambiarCant(id, delta) {
-    const prod = productos.find((p) => p.id === id);
-    const item = carrito.find((c) => c.productoId === id);
+  function cambiarCant(productoId, varianteId, delta) {
+    const prod = productos.find((p) => p.id === productoId);
+    const item = carrito.find(
+      (c) => c.productoId === productoId && (c.varianteId || null) === (varianteId || null),
+    );
     if (!prod || !item) return;
+
+    const maxStock = varianteId
+      ? Math.max(0, Number(prod.variantes?.find((v) => v.id === varianteId)?.stock) || 0)
+      : obtenerStockTotal(prod);
+
     const next = item.cantidad + delta;
     if (next < 1) {
       setAviso('Mínimo 1 unidad. Usa Eliminar para quitarlo.');
       return;
     }
-    if (next > prod.stock) {
-      setAviso('Solo hay ' + prod.stock + ' disponibles.');
+    if (next > maxStock) {
+      setAviso('Solo hay ' + maxStock + ' disponibles.');
       return;
     }
-    setCarrito(carrito.map((c) => (c.productoId === id ? { ...c, cantidad: next } : c)));
+    setCarrito(
+      carrito.map((c) =>
+        c.productoId === productoId && (c.varianteId || null) === (varianteId || null)
+          ? { ...c, cantidad: next }
+          : c,
+      ),
+    );
   }
 
-  function quitarItem(id) {
-    setCarrito(carrito.filter((c) => c.productoId !== id));
+  function quitarItem(productoId, varianteId) {
+    setCarrito(
+      carrito.filter(
+        (c) => !(c.productoId === productoId && (c.varianteId || null) === (varianteId || null)),
+      ),
+    );
     setAviso('Producto eliminado del carrito.');
   }
 
@@ -136,7 +221,17 @@ export default function App() {
     .map((c) => {
       const p = productos.find((x) => x.id === c.productoId);
       if (!p) return null;
-      return { p, cantidad: c.cantidad, totalLinea: p.precio * c.cantidad };
+      const varObj = c.varianteId ? p.variantes?.find((v) => v.id === c.varianteId) : null;
+      const precioUnit = varObj ? varObj.precioFinal : (c.precioUnitario ?? p.precio);
+      const etiqueta = varObj ? varObj.etiqueta : (c.varianteEtiqueta || '');
+      return {
+        p,
+        varianteId: c.varianteId || null,
+        etiqueta,
+        precioUnit,
+        cantidad: c.cantidad,
+        totalLinea: precioUnit * c.cantidad,
+      };
     })
     .filter(Boolean);
 
@@ -166,17 +261,40 @@ export default function App() {
       setAviso('Completa nombre, teléfono, municipio y dirección.');
       return;
     }
+
     for (const x of lineas) {
-      if (x.cantidad > x.p.stock || x.p.stock <= 0) {
-        setAviso('Sin stock suficiente para ' + x.p.nombre + '.');
-        return;
+      if (x.varianteId) {
+        const v = x.p.variantes?.find((item) => item.id === x.varianteId);
+        const stockV = Math.max(0, Number(v?.stock) || 0);
+        if (!v || x.cantidad > stockV || stockV <= 0) {
+          setAviso('Sin stock suficiente para ' + x.p.nombre + ' (' + (x.etiqueta || '') + ').');
+          return;
+        }
+      } else {
+        const stockP = obtenerStockTotal(x.p);
+        if (x.cantidad > stockP || stockP <= 0) {
+          setAviso('Sin stock suficiente para ' + x.p.nombre + '.');
+          return;
+        }
       }
     }
 
     const prodsActualizados = productos.map((p) => {
-      const enCarro = lineas.find((x) => x.p.id === p.id);
-      if (!enCarro) return p;
-      return { ...p, stock: Math.max(0, p.stock - enCarro.cantidad) };
+      const itemsProd = lineas.filter((x) => x.p.id === p.id);
+      if (!itemsProd.length) return p;
+
+      if (tieneVariantes(p)) {
+        const nuevasVariantes = p.variantes.map((v) => {
+          const enCarro = itemsProd.find((x) => x.varianteId === v.id);
+          if (!enCarro) return v;
+          return { ...v, stock: Math.max(0, (Number(v.stock) || 0) - enCarro.cantidad) };
+        });
+        const sumaStock = nuevasVariantes.reduce((acc, v) => acc + Math.max(0, Number(v.stock) || 0), 0);
+        return { ...p, variantes: nuevasVariantes, stock: sumaStock };
+      }
+
+      const simpleItem = itemsProd[0];
+      return { ...p, stock: Math.max(0, obtenerStockTotal(p) - simpleItem.cantidad) };
     });
 
     const pedido = {
@@ -184,7 +302,14 @@ export default function App() {
       fecha: 'Pedido confirmado',
       cliente: { ...cli },
       items: lineas.map((x) => ({
-        id: x.p.id, nombre: x.p.nombre, cantidad: x.cantidad, precio: x.p.precio, totalLinea: x.totalLinea,
+        clave: x.p.id + '-' + (x.varianteId || 'base'),
+        id: x.p.id,
+        varianteId: x.varianteId,
+        etiqueta: x.etiqueta,
+        nombre: x.etiqueta ? x.p.nombre + ' (' + x.etiqueta + ')' : x.p.nombre,
+        cantidad: x.cantidad,
+        precio: x.precioUnit,
+        totalLinea: x.totalLinea,
       })),
       subtotal, descuento, envio, total,
     };
@@ -254,6 +379,9 @@ export default function App() {
   }
 
   const detalle = productos.find((p) => p.id === idDetalle);
+  const varSeleccionada = detalle && tieneVariantes(detalle)
+    ? detalle.variantes.find((v) => v.id === varSelId) || null
+    : null;
   const totalCant = carrito.reduce((a, b) => a + b.cantidad, 0);
 
   if (vista === 'inicio') {
@@ -342,28 +470,43 @@ export default function App() {
           </View>
           <FlatList
             data={filtrados}
-            keyExtractor={(i) => i.id}
+            keyExtractor={(i) => String(i.id)}
             ListEmptyComponent={<Text style={styles.vacio}>No encontramos productos</Text>}
-            renderItem={({ item }) => (
-              <View style={styles.card}>
-                <Text style={styles.catTxt}>{item.categoria}</Text>
-                <Text style={styles.bold}>{item.nombre}</Text>
-                <Text style={styles.precio}>
-                  {cop(item.precio)} · {item.stock > 0 ? 'Stock: ' + item.stock : 'Agotado'}
-                </Text>
-                <View style={styles.fila}>
-                  <Pressable style={styles.btnSec} onPress={() => { setIdDetalle(item.id); setVista('detalle'); }}>
-                    <Text style={styles.txtSec}>Detalle</Text>
-                  </Pressable>
-                  <Pressable style={styles.btnPri} onPress={() => agregarCarrito(item)}>
-                    <Text style={styles.txtPri}>Agregar</Text>
-                  </Pressable>
-                  <Pressable style={styles.btnSec} onPress={() => toggleFav(item.id)}>
-                    <Text style={styles.txtSec}>{favoritos.includes(item.id) ? '★ Fav' : '☆ Fav'}</Text>
-                  </Pressable>
+            renderItem={({ item }) => {
+              const stockTotal = obtenerStockTotal(item);
+              const conVariantes = tieneVariantes(item);
+              return (
+                <View style={styles.card}>
+                  <Text style={styles.catTxt}>{item.categoria}</Text>
+                  <Text style={styles.bold}>{item.nombre}</Text>
+                  <Text style={styles.precio}>
+                    {cop(item.precio)} · {stockTotal > 0 ? 'Stock: ' + stockTotal : 'Agotado'}
+                    {conVariantes ? ' · ' + item.variantes.length + ' opciones' : ''}
+                  </Text>
+                  <View style={styles.fila}>
+                    <Pressable style={styles.btnSec} onPress={() => abrirDetalle(item.id)}>
+                      <Text style={styles.txtSec}>Detalle</Text>
+                    </Pressable>
+                    <Pressable
+                      style={styles.btnPri}
+                      onPress={() => {
+                        if (conVariantes) {
+                          abrirDetalle(item.id);
+                          setAviso('Elige una opción de ' + item.nombre + ' en el detalle.');
+                        } else {
+                          agregarCarrito(item);
+                        }
+                      }}
+                    >
+                      <Text style={styles.txtPri}>{conVariantes ? 'Elegir opción' : 'Agregar'}</Text>
+                    </Pressable>
+                    <Pressable style={styles.btnSec} onPress={() => toggleFav(item.id)}>
+                      <Text style={styles.txtSec}>{favoritos.includes(item.id) ? '★ Fav' : '☆ Fav'}</Text>
+                    </Pressable>
+                  </View>
                 </View>
-              </View>
-            )}
+              );
+            }}
           />
         </View>
       )}
@@ -376,12 +519,60 @@ export default function App() {
           <View style={styles.card}>
             <Text style={styles.catTxt}>{detalle.categoria}</Text>
             <Text style={styles.subtitulo}>{detalle.nombre}</Text>
-            <Text style={styles.precio}>{cop(detalle.precio)}</Text>
-            <Text>{detalle.stock > 0 ? 'Disponible: ' + detalle.stock : 'Agotado'}</Text>
+
+            {tieneVariantes(detalle) ? (
+              <>
+                <Text style={styles.bold}>Elige una variante:</Text>
+                <View style={styles.fila}>
+                  {detalle.variantes.map((v) => {
+                    const activa = varSelId === v.id;
+                    return (
+                      <Pressable
+                        key={v.id}
+                        style={activa ? styles.chipOn : styles.chip}
+                        onPress={() => {
+                          setVarSelId(v.id);
+                          setAviso('');
+                        }}
+                      >
+                        <Text style={activa ? styles.txtChipOn : styles.txtChip}>
+                          {v.etiqueta} {v.stock <= 0 ? '(Agotado)' : ''}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+
+                {varSeleccionada ? (
+                  <>
+                    <Text style={styles.precio}>{cop(varSeleccionada.precioFinal)}</Text>
+                    <Text>
+                      {varSeleccionada.stock > 0
+                        ? 'Disponible en esta opción: ' + varSeleccionada.stock
+                        : 'Opción sin stock disponible'}
+                    </Text>
+                  </>
+                ) : (
+                  <>
+                    <Text style={styles.precio}>Desde {cop(detalle.precio)}</Text>
+                    <Text>Stock total: {obtenerStockTotal(detalle)} · Selecciona una variante para ver su precio y stock.</Text>
+                  </>
+                )}
+              </>
+            ) : (
+              <>
+                <Text style={styles.precio}>{cop(detalle.precio)}</Text>
+                <Text>{obtenerStockTotal(detalle) > 0 ? 'Disponible: ' + obtenerStockTotal(detalle) : 'Agotado'}</Text>
+              </>
+            )}
+
             <Text style={styles.desc}>{detalle.descripcion}</Text>
             <Text>Calificación: {promResenas(detalle.resenas)}</Text>
             <View style={styles.fila}>
-              <Pressable style={styles.btnPri} onPress={() => agregarCarrito(detalle)}>
+              <Pressable
+                style={styles.btnPri}
+                onPress={() => agregarCarrito(detalle, varSeleccionada)}
+              >
                 <Text style={styles.txtPri}>Agregar al carrito</Text>
               </Pressable>
               <Pressable style={styles.btnSec} onPress={() => toggleFav(detalle.id)}>
@@ -423,8 +614,18 @@ export default function App() {
                   <Text style={styles.bold}>{p.nombre}</Text>
                   <Text style={styles.precio}>{cop(p.precio)}</Text>
                   <View style={styles.fila}>
-                    <Pressable style={styles.btnPri} onPress={() => agregarCarrito(p)}>
-                      <Text style={styles.txtPri}>Agregar</Text>
+                    <Pressable
+                      style={styles.btnPri}
+                      onPress={() => {
+                        if (tieneVariantes(p)) {
+                          abrirDetalle(p.id);
+                          setAviso('Elige una variante en el detalle.');
+                        } else {
+                          agregarCarrito(p);
+                        }
+                      }}
+                    >
+                      <Text style={styles.txtPri}>{tieneVariantes(p) ? 'Elegir opción' : 'Agregar'}</Text>
                     </Pressable>
                     <Pressable style={styles.btnSec} onPress={() => toggleFav(id)}>
                       <Text style={styles.txtSec}>Quitar</Text>
@@ -444,19 +645,21 @@ export default function App() {
             <Text style={styles.vacio}>Carrito vacío · Total: $0 · Envío: $0</Text>
           ) : (
             <>
-              {lineas.map(({ p, cantidad, totalLinea }) => (
-                <View key={p.id} style={styles.card}>
-                  <Text style={styles.bold}>{p.nombre}</Text>
-                  <Text>{cop(p.precio)} x {cantidad} = {cop(totalLinea)}</Text>
+              {lineas.map(({ p, varianteId, etiqueta, precioUnit, cantidad, totalLinea }) => (
+                <View key={String(p.id) + '-' + String(varianteId || 'base')} style={styles.card}>
+                  <Text style={styles.bold}>
+                    {p.nombre} {etiqueta ? '· ' + etiqueta : ''}
+                  </Text>
+                  <Text>{cop(precioUnit)} x {cantidad} = {cop(totalLinea)}</Text>
                   <View style={styles.fila}>
-                    <Pressable style={styles.btnSec} onPress={() => cambiarCant(p.id, -1)}>
+                    <Pressable style={styles.btnSec} onPress={() => cambiarCant(p.id, varianteId, -1)}>
                       <Text style={styles.txtSec}>-</Text>
                     </Pressable>
                     <Text style={styles.bold}>{cantidad}</Text>
-                    <Pressable style={styles.btnSec} onPress={() => cambiarCant(p.id, 1)}>
+                    <Pressable style={styles.btnSec} onPress={() => cambiarCant(p.id, varianteId, 1)}>
                       <Text style={styles.txtSec}>+</Text>
                     </Pressable>
-                    <Pressable style={styles.btnSec} onPress={() => quitarItem(p.id)}>
+                    <Pressable style={styles.btnSec} onPress={() => quitarItem(p.id, varianteId)}>
                       <Text style={styles.txtSec}>Eliminar</Text>
                     </Pressable>
                   </View>
@@ -537,7 +740,7 @@ export default function App() {
                 <Text style={styles.bold}>{ped.codigo} · {ped.fecha}</Text>
                 <Text>{ped.cliente.nombre} - {ped.cliente.municipio}</Text>
                 {ped.items.map((it) => (
-                  <Text key={it.id}>
+                  <Text key={it.clave || String(it.id)}>
                     • {it.nombre} x{it.cantidad} ({cop(it.precio)} c/u) = {cop(it.totalLinea)}
                   </Text>
                 ))}
@@ -599,9 +802,9 @@ export default function App() {
           </View>
 
           {productos.map((p) => (
-            <View key={p.id} style={styles.card}>
+            <View key={String(p.id)} style={styles.card}>
               <Text style={styles.bold}>{p.id} · {p.nombre}</Text>
-              <Text>{p.categoria} · {cop(p.precio)} · Stock: {p.stock}</Text>
+              <Text>{p.categoria} · {cop(p.precio)} · Stock: {obtenerStockTotal(p)}</Text>
               <Pressable
                 style={styles.btnSec}
                 onPress={() => {
@@ -610,7 +813,7 @@ export default function App() {
                     nombre: p.nombre,
                     categoria: p.categoria,
                     precio: String(p.precio),
-                    stock: String(p.stock),
+                    stock: String(obtenerStockTotal(p)),
                     descripcion: p.descripcion,
                   });
                 }}
@@ -626,233 +829,48 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
-  fondo: {
-    flex: 1,
-    backgroundColor: COLORS.cream,
-  },
-  inicio: {
-    flex: 1,
-    backgroundColor: COLORS.cream,
-  },
-  inicioContenido: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 24,
-  },
-  inicioMarca: {
-    alignItems: 'center',
-    marginBottom: 28,
-  },
-  inicioIcono: {
-    fontSize: 54,
-    marginBottom: 8,
-  },
-  inicioTitulo: {
-    fontSize: 42,
-    fontWeight: 'bold',
-    letterSpacing: 4,
-    color: COLORS.teal,
-  },
-  inicioEslogan: {
-    marginTop: 8,
-    fontSize: 16,
-    color: COLORS.dark,
-  },
+  fondo: { flex: 1, backgroundColor: COLORS.cream },
+  inicio: { flex: 1, backgroundColor: COLORS.cream },
+  inicioContenido: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24 },
+  inicioMarca: { alignItems: 'center', marginBottom: 28 },
+  inicioIcono: { fontSize: 54, marginBottom: 8 },
+  inicioTitulo: { fontSize: 42, fontWeight: 'bold', letterSpacing: 4, color: COLORS.teal },
+  inicioEslogan: { marginTop: 8, fontSize: 16, color: COLORS.dark },
   inicioPanel: {
-    width: '100%',
-    maxWidth: 420,
-    backgroundColor: '#FFF',
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: COLORS.sandy,
-    padding: 20,
-    alignItems: 'center',
+    width: '100%', maxWidth: 420, backgroundColor: '#FFF',
+    borderRadius: 14, borderWidth: 1, borderColor: COLORS.sandy, padding: 20, alignItems: 'center',
   },
-  inicioSubtitulo: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: COLORS.dark,
-    marginBottom: 8,
-  },
-  inicioTexto: {
-    textAlign: 'center',
-    lineHeight: 20,
-    color: COLORS.dark,
-    marginBottom: 18,
-  },
-  btnInicio: {
-    backgroundColor: COLORS.teal,
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-    borderRadius: 8,
-  },
-  txtInicio: {
-    color: '#FFF',
-    fontWeight: 'bold',
-    fontSize: 15,
-  },
-  cabecera: {
-    backgroundColor: COLORS.apricot,
-    padding: 14,
-  },
-  titulo: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: COLORS.dark,
-  },
-  eslogan: {
-    fontSize: 13,
-    color: COLORS.dark,
-  },
-  menu: {
-    backgroundColor: '#FFF',
-    padding: 8,
-    maxHeight: 50,
-  },
-  btnMenu: {
-    backgroundColor: COLORS.sandy,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 6,
-    marginRight: 8,
-  },
-  txtMenu: {
-    color: COLORS.dark,
-    fontWeight: 'bold',
-    fontSize: 12,
-  },
-  aviso: {
-    backgroundColor: '#E6F4EA',
-    padding: 10,
-    margin: 10,
-    borderRadius: 6,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  txtAviso: {
-    color: COLORS.dark,
-    flex: 1,
-    fontSize: 13,
-  },
-  area: {
-    flex: 1,
-    padding: 12,
-  },
-  grow: {
-    flex: 1,
-  },
-  input: {
-    backgroundColor: '#FFF',
-    borderWidth: 1,
-    borderColor: '#DDD',
-    borderRadius: 6,
-    padding: 8,
-    marginBottom: 8,
-    color: COLORS.dark,
-  },
-  filaScroll: {
-    marginBottom: 8,
-    maxHeight: 36,
-  },
-  fila: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    flexWrap: 'wrap',
-    marginTop: 4,
-  },
-  chip: {
-    backgroundColor: '#FFF',
-    borderWidth: 1,
-    borderColor: COLORS.sandy,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 14,
-    marginRight: 6,
-  },
-  chipOn: {
-    backgroundColor: COLORS.teal,
-    borderWidth: 1,
-    borderColor: COLORS.teal,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 14,
-    marginRight: 6,
-  },
-  txtChip: {
-    color: COLORS.dark,
-    fontSize: 12,
-  },
-  txtChipOn: {
-    color: '#FFF',
-    fontWeight: 'bold',
-    fontSize: 12,
-  },
-  card: {
-    backgroundColor: '#FFF',
-    padding: 12,
-    borderRadius: 8,
-    marginBottom: 10,
-    gap: 4,
-  },
-  catTxt: {
-    fontSize: 11,
-    fontWeight: 'bold',
-    color: COLORS.teal,
-  },
-  bold: {
-    fontWeight: 'bold',
-    color: COLORS.dark,
-  },
-  subtitulo: {
-    fontSize: 17,
-    fontWeight: 'bold',
-    color: COLORS.dark,
-    marginBottom: 8,
-  },
-  precio: {
-    fontSize: 15,
-    fontWeight: 'bold',
-    color: COLORS.dark,
-  },
-  desc: {
-    fontSize: 13,
-    color: COLORS.dark,
-    marginVertical: 4,
-  },
-  btnPri: {
-    backgroundColor: COLORS.teal,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 6,
-  },
-  txtPri: {
-    color: '#FFF',
-    fontWeight: 'bold',
-    fontSize: 12,
-  },
-  btnSec: {
-    backgroundColor: COLORS.cream,
-    borderWidth: 1,
-    borderColor: COLORS.sandy,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    borderRadius: 6,
-  },
-  txtSec: {
-    color: COLORS.dark,
-    fontWeight: 'bold',
-    fontSize: 12,
-  },
-  vacio: {
-    fontSize: 14,
-    color: COLORS.dark,
-    marginVertical: 10,
-  },
-  nota: {
-    fontSize: 12,
-    color: '#666',
-    marginVertical: 4,
-  },
+  inicioSubtitulo: { fontSize: 18, fontWeight: 'bold', color: COLORS.dark, marginBottom: 8 },
+  inicioTexto: { textAlign: 'center', lineHeight: 20, color: COLORS.dark, marginBottom: 18 },
+  btnInicio: { backgroundColor: COLORS.teal, paddingHorizontal: 24, paddingVertical: 12, borderRadius: 8 },
+  txtInicio: { color: '#FFF', fontWeight: 'bold', fontSize: 15 },
+  cabecera: { backgroundColor: COLORS.apricot, padding: 14 },
+  titulo: { fontSize: 20, fontWeight: 'bold', color: COLORS.dark },
+  eslogan: { fontSize: 13, color: COLORS.dark },
+  menu: { backgroundColor: '#FFF', padding: 8, maxHeight: 50 },
+  btnMenu: { backgroundColor: COLORS.sandy, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 6, marginRight: 8 },
+  txtMenu: { color: COLORS.dark, fontWeight: 'bold', fontSize: 12 },
+  aviso: { backgroundColor: '#E6F4EA', padding: 10, margin: 10, borderRadius: 6, flexDirection: 'row', justifyContent: 'space-between' },
+  txtAviso: { color: COLORS.dark, flex: 1, fontSize: 13 },
+  area: { flex: 1, padding: 12 },
+  grow: { flex: 1 },
+  input: { backgroundColor: '#FFF', borderWidth: 1, borderColor: '#DDD', borderRadius: 6, padding: 8, marginBottom: 8, color: COLORS.dark },
+  filaScroll: { marginBottom: 8, maxHeight: 36 },
+  fila: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 4 },
+  chip: { backgroundColor: '#FFF', borderWidth: 1, borderColor: COLORS.sandy, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 14, marginRight: 6 },
+  chipOn: { backgroundColor: COLORS.teal, borderWidth: 1, borderColor: COLORS.teal, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 14, marginRight: 6 },
+  txtChip: { color: COLORS.dark, fontSize: 12 },
+  txtChipOn: { color: '#FFF', fontWeight: 'bold', fontSize: 12 },
+  card: { backgroundColor: '#FFF', padding: 12, borderRadius: 8, marginBottom: 10, gap: 4 },
+  catTxt: { fontSize: 11, fontWeight: 'bold', color: COLORS.teal },
+  bold: { fontWeight: 'bold', color: COLORS.dark },
+  subtitulo: { fontSize: 17, fontWeight: 'bold', color: COLORS.dark, marginBottom: 8 },
+  precio: { fontSize: 15, fontWeight: 'bold', color: COLORS.dark },
+  desc: { fontSize: 13, color: COLORS.dark, marginVertical: 4 },
+  btnPri: { backgroundColor: COLORS.teal, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 6 },
+  txtPri: { color: '#FFF', fontWeight: 'bold', fontSize: 12 },
+  btnSec: { backgroundColor: COLORS.cream, borderWidth: 1, borderColor: COLORS.sandy, paddingHorizontal: 10, paddingVertical: 8, borderRadius: 6 },
+  txtSec: { color: COLORS.dark, fontWeight: 'bold', fontSize: 12 },
+  vacio: { fontSize: 14, color: COLORS.dark, marginVertical: 10 },
+  nota: { fontSize: 12, color: '#666', marginVertical: 4 },
 });
